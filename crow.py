@@ -1,0 +1,270 @@
+#!/usr/bin/python
+#################################################
+#
+# crow lex file
+#
+# IMPORTANT: PLEASE DO NOT CHANGE FILE.
+# author: huza  
+# date:   2014-3-26
+##################################################
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+reserved = {
+    '#+BEGIN_C' : 'BEGINC',
+    '#+END_C' : 'ENDC',   
+}
+
+tokens = ['CCODE','COMPILEOPTION','PYTHONCODE'] + list(reserved.values())
+
+def t_error(t):
+    print("Illegal character '%s'" % t.value[0])
+    t.lexer.skip(1)
+
+states = (
+   ('ccode','exclusive'),
+#   ('pycode','inclusive'),
+)
+
+ccode_startline = 0
+
+def t_begin_ccode(t):
+    r'\#\+BEGIN_C'
+    t.lexer.code_start = t.lexer.lexpos        # Record the starting position
+    t.lexer.level = 1                          # Initial brace level
+    t.lexer.begin('ccode')             # Starts 'foo' state
+
+    global pycode
+    pycode += "<<Error compiling C code>>"
+    logging.debug("Begin c state")
+
+    #record c code start line
+    global ccode_startline
+    ccode_startline = t.lexer.lineno
+    logging.debug( "c code start at line:")
+    logging.debug( ccode_startline )
+
+import os,sys
+from subprocess import Popen,PIPE
+
+def t_ccode_end(t):
+    r'\#\+END_C'
+    t.lexer.begin('INITIAL')        # Back to the initial state
+    logging.debug("end c state")
+
+    #record c code end line
+    ccode_endline = 'line:' + str(t.lexer.lineno)
+    logging.debug(ccode_endline)
+
+    #remove old so file
+    if os.path.exists('.__cpart__.so'):
+        os.remove('.__cpart__.so')
+
+    #output c code and compile
+    fp = open('.__cpart__.c','w')
+    fp.write(cpartcode)
+    fp.close()
+    logging.info( "compile..." )
+
+    gccoption = 'gcc -shared .__cpart__.c -o .__cpart__.so'.split()
+    #cmd = ["gcc", "-shared", ".__cpart__.c", "-o", ".__cpart__.so"];  
+    cpipe = Popen(gccoption,stdout=PIPE,stderr=PIPE)
+    out,err = cpipe.communicate()
+    out,err = pipereplace(out,err,".__cpart__.c")
+
+    print out,err
+    #get export function  fixme:maybe need support Windows platform dll export   os.name = [nt|posix]
+    if os.path.exists('.__cpart__.so'):
+        logging.debug("get export function")
+        awkoption = "nm -D .__cpart__.so | grep ' T '  | grep -v _fini| grep -v _init |awk '{print $3}'"
+        awkpipe = Popen(awkoption,stdout=PIPE,shell=True)
+        exportfunc,err = awkpipe.communicate()
+        funclist = exportfunc.split('\n')
+        funclist = filter(None,funclist)
+        logging.debug(funclist)
+        
+        from string import Template
+        libstemplate = Template( "$funcname = __libs__.$funcname;" )
+
+        global pycode
+        logging.debug("insert loadlibary line at line:")
+
+        loadline = "from ctypes import *;__libs__=cdll.LoadLibrary('./.__cpart__.so');"
+
+        for func in funclist:
+            loadline += libstemplate.substitute(funcname=func)
+
+        pycode = pycode.replace("<<Error compiling C code>>",loadline)
+        logging.debug(pycode)
+
+import re
+
+def pipereplace(out,err,srcfile):
+    out = out.replace(srcfile,sys.argv[1])
+    err = err.replace(srcfile,sys.argv[1])    
+    #search next number after :  and calc the new linenumber   fixme: this maybe rewrite by awk!!!!
+    logging.debug(err)
+    errlines = err.splitlines(True)
+    logging.debug(errlines)
+    joinline = ''
+    
+    global ccode_startline;
+
+    for errline in errlines:
+        errlist = errline.split(':')
+        #errlist = re.split(':|\n',err)
+        logging.debug(errlist)
+
+        repeatedinline = "line repeated filename:" + str(errlist.count(sys.argv[1]))
+        logging.debug(repeatedinline)
+
+        i = -1
+        try:
+            while 1:
+                i = errlist.index(sys.argv[1], i+1)
+                matchat = "match at:" + str(i)
+                logging.debug(matchat)
+                if errlist[i+1].isdigit() and errlist[i+2].isdigit():
+                    errlist[i+1] = str(int(errlist[i+1]) + int(ccode_startline) -2 )
+        except ValueError:
+            pass
+
+        joinline = joinline + ':'.join(errlist)
+
+    logging.debug(joinline)
+    #err = '\n'.join(joinline)
+    return out,joinline
+
+def t_end(t):
+    r'<<EOF>>'
+    logging.debug('end of file')
+#output python code and run python
+    fp = open('.__pypart__.py','w')
+    fp.write(pycode)
+    fp.close()
+    logging.info( "interpret..." )
+
+    pyoption = 'python .__pypart__.py'.split()
+    #cmd = ["python", ".__pypart__.py"];  
+
+    pypipe = Popen(pyoption,stdout=PIPE,stderr=PIPE)
+    out,err = pypipe.communicate()
+    out = out.replace(".__pypart__.py",sys.argv[1])
+    err = err.replace(".__pypart__.py",sys.argv[1])    
+
+    print out,err
+
+# Comments
+# def t_ccode_comment(t):
+#     r'/\*(.|\n)*?\*/'
+#     t.lexer.lineno += t.value.count('\n')
+
+#gccoption = 'gcc -shared .__cpart__.c -o .__cpart__.so'
+#pyoption = 'python .__pypart__.py'
+cpartcode = '/* C code Generated by crow */\n'
+pycode = ''
+
+# C CODE (ignored)  fixme:()?regular express
+def t_ccode_CCODE(t):
+    r'(.)*?\n'
+    global cpartcode
+    cpartcode = cpartcode + t.value
+    #print cpartcode
+
+    #add blank line in pycode
+    global pycode
+    pycode = pycode + '\n'
+
+    t.lexer.lineno += 1
+    return t
+
+# python CODE (ignored)
+def t_PYTHONCODE(t):
+    r'(.)*?\n'
+
+    global pycode
+    pycode = pycode + t.value
+    #print pycode
+
+    t.lexer.lineno += 1
+    return t
+
+
+def t_ccode_newline(t):
+    r'\n+'
+    t.lexer.lineno += t.value.count("\n")
+
+def t_newline(t):
+    r'\n+'
+    t.lexer.lineno += t.value.count("\n")
+
+#fixme:need is?
+def t_ccode_error(t):
+    print("Illegal character '%s'" % t.value[0])
+    t.lexer.skip(1)
+
+# Completely ignored characters fixme:\x0c?
+t_ignore           = ' \t\x0c'
+t_ccode_ignore     = ' \t\x0c'
+
+
+# Build the lexer
+import ply.lex as lex
+
+#release version
+lexer = lex.lex(optimize=1,lextab="crow_tab")
+#debug version
+#lexer = lex.lex()
+
+# ------- Calculator parsing rules
+
+# import ply.yacc as yacc
+
+# def p_error(p):
+#     if p:
+#         print("Syntax error at '%s'" % p.value)
+#     else:
+#         print("Syntax error at EOF")
+
+
+#parser = yacc.yacc()
+
+# Test it out
+data1 = '''
+#c code in python
+
+#+BEGIN_C//:'gcc -fopenmp -s -shared test.c -o test.so'
+
+#include <stdio.h>
+int test(int i)
+{return ++i}
+#+END_C
+
+result = test(2)
+print result
+'''
+
+# open file
+try:
+    filename = sys.argv[1]
+    f = open(filename)
+    data1 = f.read()
+    data1 += '<<EOF>>'
+    f.close()
+except IndexError:
+    sys.stdout.write("Reading from standard input (type EOF to end):\n")
+    data1 = sys.stdin.read()
+
+
+# Give the lexer some input
+lexer.input(data1)
+
+
+# Tokenize
+while True:
+    tok = lexer.token()
+    if not tok: break      # No more input
+    logging.debug(tok)
+    #print tok
+    #print tok.type, tok.value, tok.line, tok.lexpos
